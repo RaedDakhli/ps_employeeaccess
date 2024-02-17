@@ -1,6 +1,9 @@
 <?php
 require_once _PS_MODULE_DIR_ . 'ps_employeeaccess/classes/EmployeeAccess.php';
 require_once _PS_MODULE_DIR_ . 'ps_employeeaccess/classes/Logger.php';
+
+use PrestaShop\PrestaShop\Adapter\SymfonyContainer;
+
 class Ps_EmployeeAccess extends Module
 {
     public function __construct()
@@ -29,7 +32,8 @@ class Ps_EmployeeAccess extends Module
             parent::install() &&
             $this->registerHook('actionProductUpdate') &&
             $this->registerHook('displayAdminProductsExtra') &&
-            $this->registerHook('actionProductGridQueryBuilderModifier') &&
+            $this->registerHook('actionAdminProductsListingFieldsModifier') &&
+            $this->registerHook('actionManufacturerFormModifier') &&
             $this->registerHook('displayBackOfficeHeader') &&
             Configuration::updateValue('PS_EMPLOYEE_PROFILE_ID', 5)
         ) {
@@ -63,28 +67,32 @@ class Ps_EmployeeAccess extends Module
     {
         $output = '';
 
-        // Update the value of PS_EMPLOYEE_PROFILE_ID
-        $newProfileId = (int) Tools::getValue('PS_EMPLOYEE_PROFILE_ID');
-        Configuration::updateValue('PS_EMPLOYEE_PROFILE_ID', $newProfileId);
+        if (Tools::isSubmit('submit' . $this->name)) {
 
-        // Clear the cache
-        $this->_clearCache('*');
+            // Update the value of PS_EMPLOYEE_PROFILE_ID
+            $newProfileId = (int) Tools::getValue('PS_EMPLOYEE_PROFILE_ID');
+            Configuration::updateValue('PS_EMPLOYEE_PROFILE_ID', $newProfileId);
 
-        // Display confirmation message
-        $confirmationMessage = $this->trans('The settings have been updated.', [], 'Admin.Notifications.Success');
-        $output .= $this->displayConfirmation($confirmationMessage);
+            // Clear the cache
+            $this->_clearCache('*');
 
-        // Log the update action
-        $logMessage = sprintf(
-            'PS_EMPLOYEE_PROFILE_ID updated to %d by Employee %d',
-            $newProfileId,
-            (int)Context::getContext()->employee->id
-        );
-        Logger::log($logMessage);
+            // Display confirmation message
+            $confirmationMessage = $this->trans('The settings have been updated.', [], 'Admin.Notifications.Success');
+            $output .= $this->displayConfirmation($confirmationMessage);
+
+            // Log the update action
+            $logMessage = sprintf(
+                'PS_EMPLOYEE_PROFILE_ID updated to %d by Employee %d',
+                $newProfileId,
+                (int)Context::getContext()->employee->id
+            );
+            Logger::log($logMessage);
+        }
 
         // Render the configuration form
         return $output . $this->renderForm();
     }
+
 
     /**
      * Render the configuration form.
@@ -94,7 +102,7 @@ class Ps_EmployeeAccess extends Module
     public function renderForm()
     {
         // Retrieve employee profiles
-        $employees = Profile::getProfiles($this->context->language->id); // Récupérer la liste des employés pour le profil 5
+        $profiles = Profile::getProfiles($this->context->language->id); // Récupérer la liste des employés pour le profil 5
 
         // Define form fields
         $fields_form = array(
@@ -109,7 +117,7 @@ class Ps_EmployeeAccess extends Module
                         'label' => $this->l('Employee Profile'),
                         'name' => 'PS_EMPLOYEE_PROFILE_ID',
                         'options' => array(
-                            'query' => $employees,
+                            'query' => $profiles,
                             'id' => 'id_profile',
                             'name' => 'name',
                         ),
@@ -132,7 +140,6 @@ class Ps_EmployeeAccess extends Module
         $helper->submit_action = 'submit' . $this->name;
         // Set default field value
         $helper->fields_value['PS_EMPLOYEE_PROFILE_ID'] = Configuration::get('PS_EMPLOYEE_PROFILE_ID', true);
-
         // Generate the form HTML
         return $helper->generateForm(array($fields_form));
     }
@@ -161,33 +168,73 @@ class Ps_EmployeeAccess extends Module
      */
     public function hookDisplayAdminProductsExtra($params)
     {
+        // Retrieve profile ID
+        $profileId = (int)Context::getContext()->employee->id_profile;
+
+        // Retrieve employee ID
+        $employeeId = (int)Context::getContext()->employee->id;
+
         // Extract the product ID from the request parameters
-        $productId = (int)Tools::getValue('id_product');
+        $productId = (int)$params['id_product'];
 
-        // Check if a valid product ID is provided
-        if ($productId > 0) {
 
-            // Load the product object based on the ID
-            $product = new Product($productId);
 
-            // Retrieve employees based on the configured employee profile ID
-            $employees = Employee::getEmployeesByProfile((Configuration::get('PS_EMPLOYEE_PROFILE_ID', true)));
+        if ($profileId == Configuration::get('PS_EMPLOYEE_PROFILE_ID', true)) {
 
-            // Retrieve the selected employee for the product
-            $selected_employee = EmployeeAccess::getByProductId($productId);
+            // Log the action
+            $logMessage = sprintf(
+                'Product %d viewd by Employee ID: %d',
+                $employeeId,
+                $employeeId,
 
-            // Assign variables to Smarty for template rendering
-            $this->context->smarty->assign(array(
-                'selected_employee' => $selected_employee,
-                'employees' => $employees,
-                'product' => $product,
-            ));
+            );
+            PrestaShopLogger::addLog($logMessage, 1);
+            // Retrieve product IDs associated with the employee
+            $productIds = EmployeeAccess::getProductsSqlByEmployee($employeeId);
 
-            // Render the template and return the HTML content
-            return $this->display(__FILE__, 'views/templates/admin/employee_attach.tpl');
+            // Extract product IDs from the array
+            $productIdsArray = array_column($productIds, 'id_product');
+
+            if (!in_array($productId, $productIdsArray)) {
+                // Log the action
+                $logMessage = sprintf(
+                    'Attempt from Employee %d to consult non-owned product: %d',
+                    $employeeId,
+                    $productId,
+
+                );
+                PrestaShopLogger::addLog($logMessage, 2);
+                $sfContainer = SymfonyContainer::getInstance();
+                $sfRouter = $sfContainer->get('router');
+                Tools::redirectAdmin($sfRouter->generate(
+                    'admin_product_catalog'
+                ));
+            }
+        } else {
+
+            // Check if a valid product ID is provided
+            if ($productId > 0) {
+
+                // Load the product object based on the ID
+                $product = new Product($productId);
+
+                // Retrieve employees based on the configured employee profile ID
+                $employees = Employee::getEmployeesByProfile((Configuration::get('PS_EMPLOYEE_PROFILE_ID', true)));
+
+                // Retrieve the selected employee for the product
+                $selected_employee = EmployeeAccess::getByProductId($productId);
+
+                // Assign variables to Smarty for template rendering
+                $this->context->smarty->assign(array(
+                    'selected_employee' => $selected_employee,
+                    'employees' => $employees,
+                    'product' => $product,
+                ));
+
+                // Render the template and return the HTML content
+                return $this->display(__FILE__, 'views/templates/admin/employee_attach.tpl');
+            }
         }
-        // If no valid product ID is provided, return null
-        return null;
     }
 
     /**
@@ -243,18 +290,13 @@ class Ps_EmployeeAccess extends Module
         Logger::log($logMessage);
     }
 
-    /**
-     * Modifies the product grid query builder to filter products based on employee access.
-     *
-     * @param array $params Parameters passed to the hook.
-     * @throws PrestaShopDatabaseException
-     * @throws PrestaShopException
-     */
-    public function hookActionProductGridQueryBuilderModifier(array $params)
-    {
-        /** @var \Doctrine\DBAL\Query\QueryBuilder $queryBuilder */
-        $queryBuilder = $params['search_query_builder'];
 
+    /**
+     * Modification de la requête de la liste
+     * @param type $params
+     */
+    public function hookActionAdminProductsListingFieldsModifier($params)
+    {
         // Retrieve employee ID
         $employeeId = (int)Context::getContext()->employee->id;
 
@@ -263,7 +305,6 @@ class Ps_EmployeeAccess extends Module
 
         // Retrieve product IDs associated with the employee
         $productIds = EmployeeAccess::getProductsSqlByEmployee($employeeId);
-
 
         // If no products are associated with the employee, or if the profile is not PS_EMPLOYEE_PROFILE_ID, do nothing
         if (empty($productIds) && $profileId != Configuration::get('PS_EMPLOYEE_PROFILE_ID', true)) {
@@ -277,14 +318,14 @@ class Ps_EmployeeAccess extends Module
         $productIdsString = implode(',', $productIdsArray);
 
         // Construct the new SQL query to filter products
-        $whereClause = 'p.id_product IN (' . $productIdsString . ')';
-        $queryBuilder->andWhere($whereClause);
+        if (isset($productIdsArray)) {
+            $whereClause = 'p.id_product IN (' . $productIdsString . ')';
+        } else {
+            $whereClause = 'p.id_product = 0 ';
+        }
 
-        $countQueryBuilder = $params['count_query_builder'];
-
-        // So the pagination and the number of customers
-        // retrieved will be right.
-        $countQueryBuilder->andWhere($whereClause);
+        // Add the employee access filter to the product listing query
+        $params['sql_where'][] = $whereClause;
 
         // Log the action
         $logMessage = sprintf(
@@ -294,5 +335,16 @@ class Ps_EmployeeAccess extends Module
 
         );
         Logger::log($logMessage);
+    }
+
+    public function hookActionManufacturerFormModifier($params)
+    {
+        dump($params);
+        exit;
+        $options = &$params['options'];
+        $options[] = array(
+            'id_option' => 123, // ID de l'option de fabricant
+            'name' => 'Nom de la marque', // Nom de la marque
+        );
     }
 }
